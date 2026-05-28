@@ -21,6 +21,235 @@ except ImportError:
 app = Flask(__name__)
 
 
+DASHBOARD_HTML = """
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ROS2 Robot Control Room</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #dbe3ef;
+      --text: #111827;
+      --muted: #667085;
+      --primary: #2563eb;
+      --danger: #dc2626;
+      --ok: #16a34a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, "Noto Sans KR", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 18px 22px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    h1 { margin: 0; font-size: 24px; }
+    .subtitle { margin-top: 6px; color: var(--muted); font-size: 14px; }
+    main {
+      display: grid;
+      grid-template-columns: minmax(420px, 1.55fr) minmax(320px, 0.9fr);
+      gap: 16px;
+      padding: 16px;
+    }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px;
+    }
+    .video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+      background: #e5e7eb;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+    }
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin-top: 12px;
+    }
+    .status-card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #f8fafc;
+    }
+    .label { color: var(--muted); font-size: 12px; }
+    .value { margin-top: 4px; font-weight: 700; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    .controls {
+      display: grid;
+      gap: 14px;
+    }
+    .drive-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      max-width: 320px;
+      margin: 0 auto;
+    }
+    button {
+      border: 1px solid #bfdbfe;
+      border-radius: 8px;
+      background: #ffffff;
+      color: var(--primary);
+      padding: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.primary { background: var(--primary); color: #fff; }
+    button.danger { background: var(--danger); color: #fff; border-color: #fecaca; }
+    button:hover { filter: brightness(0.97); }
+    .span-3 { grid-column: span 3; }
+    .arm-row {
+      display: grid;
+      grid-template-columns: 112px 1fr 52px;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0;
+    }
+    input[type="range"] { width: 100%; }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+      .status-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ROS2 Robot Control Room</h1>
+    <div class="subtitle">Camera + YOLO detection + wheel control + robot arm control</div>
+  </header>
+  <main>
+    <section>
+      <img class="video" src="/stream" alt="Robot camera stream">
+      <div class="status-grid">
+        <div class="status-card"><div class="label">Camera</div><div class="value" id="camera">-</div></div>
+        <div class="status-card"><div class="label">Detection</div><div class="value" id="detect">-</div></div>
+        <div class="status-card"><div class="label">People</div><div class="value" id="people">-</div></div>
+        <div class="status-card"><div class="label">Drive</div><div class="value" id="drive">-</div></div>
+      </div>
+    </section>
+    <section class="controls">
+      <div>
+        <h2>Wheels</h2>
+        <div class="drive-grid">
+          <div></div><button onmousedown="drive(0, 0.35)" onmouseup="stop()" ontouchstart="drive(0, 0.35)" ontouchend="stop()">Forward</button><div></div>
+          <button onmousedown="drive(-0.45, 0)" onmouseup="stop()" ontouchstart="drive(-0.45, 0)" ontouchend="stop()">Left</button>
+          <button class="danger" onclick="stop()">STOP</button>
+          <button onmousedown="drive(0.45, 0)" onmouseup="stop()" ontouchstart="drive(0.45, 0)" ontouchend="stop()">Right</button>
+          <div></div><button onmousedown="drive(0, -0.35)" onmouseup="stop()" ontouchstart="drive(0, -0.35)" ontouchend="stop()">Back</button><div></div>
+        </div>
+      </div>
+      <div>
+        <h2>Robot Arm</h2>
+        <div id="arm-sliders"></div>
+        <div class="actions">
+          <button class="primary" onclick="armAction('home')">Home</button>
+          <button onclick="armAction('grip')">Grip</button>
+          <button onclick="armAction('release')">Release</button>
+        </div>
+      </div>
+      <div>
+        <h2>Detection</h2>
+        <div class="actions">
+          <button onclick="detect(true)">YOLO On</button>
+          <button onclick="detect(false)">YOLO Off</button>
+          <button onclick="refreshStatus()">Refresh</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const servos = [
+      ["Base", 1, 500, 1500],
+      ["Shoulder", 2, 500, 2200],
+      ["Elbow", 3, 500, 2200],
+      ["Wrist Pitch", 4, 500, 1200],
+      ["Wrist Roll", 5, 500, 1200],
+      ["Gripper", 10, 500, 700],
+    ];
+
+    function request(path) {
+      return fetch(path).then(r => r.json()).catch(err => ({ ok: false, error: String(err) }));
+    }
+
+    function drive(x, y) {
+      request(`/control?action=move&x=${x}&y=${y}`).then(refreshStatus);
+    }
+
+    function stop() {
+      request("/control?action=stop").then(refreshStatus);
+    }
+
+    function armServo(id, position, duration) {
+      request(`/arm?action=servo&id=${id}&position=${position}&duration=${duration}`).then(refreshStatus);
+    }
+
+    function armAction(action) {
+      request(`/arm?action=${action}`).then(refreshStatus);
+    }
+
+    function detect(enabled) {
+      request(`/detect?enabled=${enabled}`).then(refreshStatus);
+    }
+
+    function buildArmSliders() {
+      const root = document.getElementById("arm-sliders");
+      root.innerHTML = "";
+      for (const [label, id, initial, duration] of servos) {
+        const row = document.createElement("div");
+        row.className = "arm-row";
+        row.innerHTML = `
+          <div>${label}</div>
+          <input type="range" min="0" max="1000" value="${initial}">
+          <div>${initial}</div>
+        `;
+        const slider = row.querySelector("input");
+        const value = row.querySelector("div:last-child");
+        slider.addEventListener("input", () => value.textContent = slider.value);
+        slider.addEventListener("change", () => armServo(id, slider.value, duration));
+        root.appendChild(row);
+      }
+    }
+
+    function refreshStatus() {
+      request("/status").then(data => {
+        document.getElementById("camera").textContent = data.camera_frame_ready ? "Ready" : "Waiting";
+        document.getElementById("detect").textContent = data.detection_enabled ? "On" : "Off";
+        document.getElementById("people").textContent = data.person_count ?? 0;
+        document.getElementById("drive").textContent = `${data.action || "-"} x=${data.x ?? 0} y=${data.y ?? 0}`;
+      });
+    }
+
+    buildArmSliders();
+    refreshStatus();
+    setInterval(refreshStatus, 1000);
+  </script>
+</body>
+</html>
+"""
+
+
 class RobotState:
     action = "stop"
     x = 0.0
@@ -295,6 +524,11 @@ def mjpeg_frames():
 @app.get("/stream")
 def stream():
     return Response(mjpeg_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.get("/")
+def dashboard():
+    return Response(DASHBOARD_HTML, mimetype="text/html")
 
 
 def spin_ros():

@@ -2,6 +2,7 @@ package com.example.robotjoystick;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -13,6 +14,13 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
+    private static final int COLOR_BACKGROUND = Color.rgb(246, 248, 251);
+    private static final int COLOR_SURFACE = Color.WHITE;
+    private static final int COLOR_TEXT = Color.rgb(17, 24, 39);
+    private static final int COLOR_MUTED = Color.rgb(75, 85, 99);
+    private static final int COLOR_PRIMARY = Color.rgb(37, 99, 235);
+    private static final int COLOR_DANGER = Color.rgb(220, 38, 38);
+
     private final RobotCommandClient commandClient = new RobotCommandClient();
     private LinearLayout controlContainer;
     private Button wheelTabButton;
@@ -25,35 +33,36 @@ public class MainActivity extends Activity {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(Color.rgb(17, 24, 39));
-        root.setPadding(24, 24, 24, 24);
+        root.setBackgroundColor(COLOR_BACKGROUND);
+        root.setPadding(22, 18, 22, 18);
 
         TextView title = new TextView(this);
-        title.setText("Robot Camera + Joystick");
-        title.setTextColor(Color.WHITE);
-        title.setTextSize(22f);
+        title.setText("ROS2 Robot Controller");
+        title.setTextColor(COLOR_TEXT);
+        title.setTextSize(21f);
         title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 8, 0, 18);
+        title.setPadding(0, 2, 0, 10);
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         WebView videoView = new WebView(this);
-        videoView.setBackgroundColor(Color.BLACK);
+        videoView.setBackgroundColor(COLOR_SURFACE);
         WebSettings settings = videoView.getSettings();
         settings.setJavaScriptEnabled(false);
         settings.setLoadWithOverviewMode(true);
         settings.setUseWideViewPort(true);
         videoView.loadUrl(RobotConfig.VIDEO_URL);
+        videoView.setBackground(makeRoundedBackground(COLOR_SURFACE, Color.rgb(226, 232, 240), 14f));
         root.addView(videoView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
-                1.15f));
+                0.72f));
 
         LinearLayout tabRow = new LinearLayout(this);
         tabRow.setOrientation(LinearLayout.HORIZONTAL);
         tabRow.setGravity(Gravity.CENTER);
-        tabRow.setPadding(0, 18, 0, 10);
+        tabRow.setPadding(0, 12, 0, 8);
 
         wheelTabButton = new Button(this);
         wheelTabButton.setText("Wheels");
@@ -79,16 +88,18 @@ public class MainActivity extends Activity {
 
         controlContainer = new LinearLayout(this);
         controlContainer.setOrientation(LinearLayout.VERTICAL);
+        controlContainer.setPadding(0, 4, 0, 0);
         root.addView(controlContainer, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
-                1f));
+                1.18f));
 
         statusText = new TextView(this);
         statusText.setText("Ready. Camera stays on while controls switch below.");
-        statusText.setTextColor(Color.rgb(209, 213, 219));
+        statusText.setTextColor(COLOR_MUTED);
         statusText.setGravity(Gravity.CENTER);
-        statusText.setPadding(0, 12, 0, 12);
+        statusText.setTextSize(13f);
+        statusText.setPadding(0, 8, 0, 4);
         root.addView(statusText, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -122,6 +133,7 @@ public class MainActivity extends Activity {
         Button stopButton = new Button(this);
         stopButton.setText("EMERGENCY STOP");
         stopButton.setAllCaps(false);
+        styleButton(stopButton, COLOR_DANGER, Color.WHITE);
         stopButton.setOnClickListener(view -> commandClient.sendStop(this::setStatus));
         controlContainer.addView(stopButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -137,7 +149,7 @@ public class MainActivity extends Activity {
 
         TextView armTitle = new TextView(this);
         armTitle.setText("Robot Arm Control");
-        armTitle.setTextColor(Color.WHITE);
+        armTitle.setTextColor(COLOR_TEXT);
         armTitle.setTextSize(18f);
         armTitle.setGravity(Gravity.CENTER);
         armTitle.setPadding(0, 8, 0, 12);
@@ -158,6 +170,7 @@ public class MainActivity extends Activity {
         Button homeButton = new Button(this);
         homeButton.setText("Arm Home");
         homeButton.setAllCaps(false);
+        styleButton(homeButton, COLOR_PRIMARY, Color.WHITE);
         homeButton.setOnClickListener(view -> commandClient.sendArmAction("home", this::setStatus));
         buttonRow.addView(homeButton, new LinearLayout.LayoutParams(
                 0,
@@ -167,6 +180,7 @@ public class MainActivity extends Activity {
         Button gripButton = new Button(this);
         gripButton.setText("Grip");
         gripButton.setAllCaps(false);
+        styleButton(gripButton, Color.rgb(14, 165, 233), Color.WHITE);
         gripButton.setOnClickListener(view -> commandClient.sendArmAction("grip", this::setStatus));
         buttonRow.addView(gripButton, new LinearLayout.LayoutParams(
                 0,
@@ -183,7 +197,8 @@ public class MainActivity extends Activity {
     private void addArmSlider(String label, int servoId, int progress) {
         TextView text = new TextView(this);
         text.setText(label + "  ID " + servoId + "  " + progress);
-        text.setTextColor(Color.rgb(229, 231, 235));
+        text.setTextColor(COLOR_TEXT);
+        text.setTextSize(14f);
         text.setPadding(0, 4, 0, 0);
         controlContainer.addView(text, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -235,10 +250,14 @@ public class MainActivity extends Activity {
     }
 
     private void updateTabs(boolean wheelsSelected) {
-        wheelTabButton.setEnabled(!wheelsSelected);
-        armTabButton.setEnabled(wheelsSelected);
         wheelTabButton.setText(wheelsSelected ? "Wheels *" : "Wheels");
         armTabButton.setText(wheelsSelected ? "Arm" : "Arm *");
+        styleButton(wheelTabButton, wheelsSelected ? COLOR_PRIMARY : COLOR_SURFACE,
+                wheelsSelected ? Color.WHITE : COLOR_PRIMARY);
+        styleButton(armTabButton, wheelsSelected ? COLOR_SURFACE : COLOR_PRIMARY,
+                wheelsSelected ? COLOR_PRIMARY : Color.WHITE);
+        wheelTabButton.setEnabled(true);
+        armTabButton.setEnabled(true);
     }
 
     @Override
@@ -250,5 +269,19 @@ public class MainActivity extends Activity {
 
     private void setStatus(String status) {
         statusText.setText(status);
+    }
+
+    private GradientDrawable makeRoundedBackground(int fillColor, int strokeColor, float radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fillColor);
+        drawable.setCornerRadius(radius);
+        drawable.setStroke(2, strokeColor);
+        return drawable;
+    }
+
+    private void styleButton(Button button, int backgroundColor, int textColor) {
+        button.setTextColor(textColor);
+        button.setBackground(makeRoundedBackground(backgroundColor, Color.rgb(191, 219, 254), 12f));
+        button.setPadding(10, 8, 10, 8);
     }
 }

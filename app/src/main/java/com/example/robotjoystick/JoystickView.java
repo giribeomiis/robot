@@ -38,12 +38,12 @@ public class JoystickView extends View {
 
     private void init() {
         setBackgroundColor(Color.TRANSPARENT);
-        basePaint.setColor(Color.rgb(31, 41, 55));
+        basePaint.setColor(Color.rgb(239, 246, 255));
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(6f);
-        ringPaint.setColor(Color.rgb(96, 165, 250));
+        ringPaint.setColor(Color.rgb(37, 99, 235));
         knobPaint.setColor(Color.rgb(59, 130, 246));
-        crossPaint.setColor(Color.argb(120, 229, 231, 235));
+        crossPaint.setColor(Color.argb(150, 147, 197, 253));
         crossPaint.setStrokeWidth(3f);
     }
 
@@ -62,8 +62,8 @@ public class JoystickView extends View {
         float drawKnobX = tracking ? knobX : centerX;
         float drawKnobY = tracking ? knobY : centerY;
 
-        basePaint.setShader(new RadialGradient(centerX, centerY, radius, Color.rgb(55, 65, 81),
-                Color.rgb(17, 24, 39), Shader.TileMode.CLAMP));
+        basePaint.setShader(new RadialGradient(centerX, centerY, radius, Color.WHITE,
+                Color.rgb(219, 234, 254), Shader.TileMode.CLAMP));
         canvas.drawCircle(centerX, centerY, radius, basePaint);
         basePaint.setShader(null);
         canvas.drawCircle(centerX, centerY, radius, ringPaint);

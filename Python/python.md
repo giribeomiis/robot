@@ -13,3 +13,11 @@ source/opt/ros/humble/setup.zsh
 source~/ros2_ws/install/setup.zsh 
 YOLO_MODEL=yolov8n.pt YOLO_IMAGE_SIZE=416 YOLO_CONFIDENCE=0.35 python3 camera_server.py
 
+5. 추가할 예정 아두이노
+Android 앱 / PC 관제 페이지
+        ↓ HTTP
+Jetson camera_server.py
+        ↓ Serial USB
+Arduino
+        ↓
+LED / 센서 / 릴레이 / 추가 서보 / 기타 장치

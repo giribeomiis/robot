@@ -23,6 +23,9 @@ app = Flask(__name__)
 latest_jpeg = None
 latest_jpeg_lock = threading.Lock()
 
+latest_depth_jpeg = None
+latest_depth_jpeg_lock = threading.Lock()
+
 node = None
 
 
@@ -50,18 +53,24 @@ DASHBOARD_HTML = """
     .follow-row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     .follow-row input { width: 80px; padding: 6px; border: 1px solid #cbd5e1; border-radius: 6px; }
     .follow-state { margin-top: 8px; padding: 8px; background: #f1f5f9; border-radius: 6px; font-family: monospace; font-size: 12px; }
+    .camera-title { margin: 14px 0 8px; }
     @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <header>
     <h1>Robot Control Room</h1>
-    <div>Camera / YOLO+Depth / Wheels / Robot Arm / Auto-Follow</div>
+    <div>RGB / Depth / YOLO+Depth / Wheels / Robot Arm / Auto-Follow</div>
   </header>
 
   <main>
     <section>
-      <img src="/stream" alt="camera">
+      <h2 class="camera-title">RGB Camera</h2>
+      <img src="/stream" alt="rgb camera">
+
+      <h2 class="camera-title">Depth Camera</h2>
+      <img src="/depth_stream" alt="depth camera">
+
       <p class="status" id="status">status loading...</p>
       <div class="people-list" id="people"></div>
     </section>
@@ -119,6 +128,7 @@ DASHBOARD_HTML = """
     function req(path) {
       return fetch(path).then(r => r.json()).catch(e => ({ok:false, error:String(e)}));
     }
+
     function drive(x, y) { req(`/control?action=move&x=${x}&y=${y}`).then(updateStatus); }
     function stop() { req("/control?action=stop").then(updateStatus); }
     function armServo(id, position, duration) {
@@ -149,7 +159,8 @@ DASHBOARD_HTML = """
     function updateStatus() {
       req("/status").then(data => {
         document.getElementById("status").innerHTML =
-          `camera=${data.camera_frame_ready ? "ready" : "waiting"} / ` +
+          `rgb=${data.camera_frame_ready ? "ready" : "waiting"} / ` +
+          `depth_view=${data.depth_view_ready ? "ready" : "waiting"} / ` +
           `depth=${data.depth_frame_ready ? "ready" : "waiting"} / ` +
           `intrinsics=${data.camera_info_received ? "ok" : "missing"}<br>` +
           `yolo=${data.yolo_loaded ? "loaded" : "not loaded"} / ` +
@@ -206,37 +217,30 @@ class RobotBridge(Node):
 
         self.bridge = CvBridge()
 
-        # ------- 탐지 결과 -------
         self.latest_people = []
         self._people_lock = threading.Lock()
-        self._last_detection_time = 0.0  # monotonic, watchdog용
+        self._last_detection_time = 0.0
 
-        # ------- YOLO 워커 핸드오프 -------
         self._pending_frame = None
         self._yolo_lock = threading.Lock()
         self._yolo_event = threading.Event()
         self._stop_event = threading.Event()
 
-        # ------- Depth + intrinsics -------
         self._latest_depth = None
         self._depth_lock = threading.Lock()
         self._depth_frame_ready = False
 
-        self._camera_info = None  # (fx, fy, cx, cy)
+        self._camera_info = None
         self._camera_info_lock = threading.Lock()
 
-        # 이미지 폭 — follow 컨트롤러가 화면 중앙 계산 시 필요.
-        # 첫 프레임에서 결정되고 이후 변하지 않는다고 가정.
         self._image_width = None
         self._image_width_lock = threading.Lock()
 
-        # ------- 통계 -------
         self._frames_dropped = 0
         self._yolo_fps = 0.0
         self._yolo_fps_window_start = time.monotonic()
         self._yolo_fps_window_count = 0
 
-        # ------- 설정 -------
         self.detection_enabled = True
         self.depth_min_m = float(os.getenv("DEPTH_MIN_M", "0.1"))
         self.depth_max_m = float(os.getenv("DEPTH_MAX_M", "10.0"))
@@ -252,10 +256,8 @@ class RobotBridge(Node):
         else:
             self.get_logger().warn("ultralytics is not installed. Detection disabled.")
 
-        # ------- 자동 추종 컨트롤러 -------
         self.follow = FollowController(self)
 
-        # ------- YOLO 워커 스레드 -------
         self._yolo_thread = None
         if self.yolo is not None:
             self._yolo_thread = threading.Thread(
@@ -266,7 +268,6 @@ class RobotBridge(Node):
             self._yolo_thread.start()
             self.get_logger().info("YOLO worker thread started")
 
-        # ------- ROS 구독/발행 -------
         rgb_topic = os.getenv("RGB_TOPIC", "/depth_cam/rgb/image_raw")
         depth_topic = os.getenv("DEPTH_TOPIC", "/depth_cam/depth/image_raw")
         info_topic = os.getenv("CAMERA_INFO_TOPIC", "/depth_cam/rgb/camera_info")
@@ -282,16 +283,12 @@ class RobotBridge(Node):
             10,
         )
 
-        # ------- 자동 추종 스레드 시작 -------
         self.follow.start()
 
         self.get_logger().info(f"Subscribed RGB: {rgb_topic}")
         self.get_logger().info(f"Subscribed depth: {depth_topic}")
         self.get_logger().info(f"Subscribed camera_info: {info_topic}")
 
-    # ------------------------------------------------------------------
-    # ROS 콜백
-    # ------------------------------------------------------------------
     def on_image(self, msg):
         global latest_jpeg
 
@@ -301,7 +298,6 @@ class RobotBridge(Node):
             self.get_logger().error(f"RGB conversion error: {e}")
             return
 
-        # 이미지 폭 캐시 (follow 컨트롤러에서 사용)
         h, w = frame.shape[:2]
         with self._image_width_lock:
             if self._image_width != w:
@@ -320,7 +316,6 @@ class RobotBridge(Node):
         if people_snapshot:
             self._draw_people(frame, people_snapshot)
 
-        # 추종 대상 표시 (있으면)
         target = self.follow.get_locked_target()
         if target is not None:
             self._draw_target_marker(frame, target)
@@ -332,14 +327,40 @@ class RobotBridge(Node):
                 latest_jpeg = data
 
     def on_depth(self, msg):
+        global latest_depth_jpeg
+
         try:
             depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
         except Exception as e:
             self.get_logger().error(f"Depth conversion error: {e}")
             return
+
         with self._depth_lock:
             self._latest_depth = depth
             self._depth_frame_ready = True
+
+        try:
+            if depth.dtype == np.uint16:
+                depth_m = depth.astype(np.float32) / 1000.0
+            else:
+                depth_m = depth.astype(np.float32)
+
+            valid = np.isfinite(depth_m) & (depth_m > 0)
+            display = np.zeros(depth_m.shape, dtype=np.uint8)
+
+            if valid.any():
+                clipped = np.clip(depth_m, 0.2, 4.0)
+                normalized = ((clipped - 0.2) / (4.0 - 0.2) * 255.0).astype(np.uint8)
+                display[valid] = normalized[valid]
+
+            display = cv2.applyColorMap(display, cv2.COLORMAP_TURBO)
+
+            ok, encoded = cv2.imencode(".jpg", display)
+            if ok:
+                with latest_depth_jpeg_lock:
+                    latest_depth_jpeg = encoded.tobytes()
+        except Exception as e:
+            self.get_logger().error(f"Depth encode error: {e}")
 
     def on_camera_info(self, msg):
         try:
@@ -347,18 +368,18 @@ class RobotBridge(Node):
             fx, fy, cx, cy = float(k[0]), float(k[4]), float(k[2]), float(k[5])
         except Exception:
             return
+
         if fx <= 0 or fy <= 0:
             return
+
         with self._camera_info_lock:
             self._camera_info = (fx, fy, cx, cy)
 
-    # ------------------------------------------------------------------
-    # YOLO 워커
-    # ------------------------------------------------------------------
     def _yolo_worker(self):
         while not self._stop_event.is_set():
             if not self._yolo_event.wait(timeout=0.5):
                 continue
+
             self._yolo_event.clear()
 
             with self._yolo_lock:
@@ -421,6 +442,7 @@ class RobotBridge(Node):
             imgsz=self.yolo_image_size,
             verbose=False,
         )
+
         boxes = []
         for result in results:
             if result.boxes is None:
@@ -433,6 +455,7 @@ class RobotBridge(Node):
     def _depth_at_box(self, depth_frame, x, y, w, h, rgb_w, rgb_h):
         if depth_frame is None:
             return None
+
         dh, dw = depth_frame.shape[:2]
 
         if (dh, dw) != (rgb_h, rgb_w):
@@ -447,6 +470,7 @@ class RobotBridge(Node):
         cx_end = min(dw, int(x + w * 0.75))
         cy_start = max(0, int(y + h * 0.25))
         cy_end = min(dh, int(y + h * 0.75))
+
         if cx_end <= cx_start or cy_end <= cy_start:
             return None
 
@@ -466,34 +490,44 @@ class RobotBridge(Node):
             return None
 
         valid_m = valid_m[(valid_m >= self.depth_min_m) & (valid_m <= self.depth_max_m)]
+
         if valid_m.size == 0:
             return None
+
         return float(np.median(valid_m))
 
     def _draw_people(self, frame, people):
         for index, p in enumerate(people, start=1):
             x, y, w, h = p["x"], p["y"], p["w"], p["h"]
             cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 80), 2)
+
             label = f"person {index}"
             if p["distance"] is not None:
                 label += f" {p['distance']:.2f}m"
+
             cv2.putText(
-                frame, label, (x, max(20, y - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 80), 2,
+                frame,
+                label,
+                (x, max(20, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 80),
+                2,
             )
 
     def _draw_target_marker(self, frame, target):
-        """추종 대상 박스를 다른 색으로 강조."""
         x, y, w, h = target["x"], target["y"], target["w"], target["h"]
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 80, 255), 3)
         cv2.putText(
-            frame, "TARGET", (x, y + h + 22),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2,
+            frame,
+            "TARGET",
+            (x, y + h + 22),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 80, 255),
+            2,
         )
 
-    # ------------------------------------------------------------------
-    # 로봇 제어
-    # ------------------------------------------------------------------
     def move(self, x, y):
         msg = Twist()
         msg.linear.x = y * 0.2
@@ -501,7 +535,6 @@ class RobotBridge(Node):
         self.cmd_pub.publish(msg)
 
     def publish_cmd(self, linear_x, angular_z):
-        """follow 컨트롤러용 — 이미 m/s, rad/s 단위로 받음."""
         msg = Twist()
         msg.linear.x = linear_x
         msg.angular.z = angular_z
@@ -513,20 +546,31 @@ class RobotBridge(Node):
     def servo(self, servo_id, position, duration):
         msg = ServosPosition()
         msg.duration = duration
+
         servo = ServoPosition()
         servo.id = servo_id
         servo.position = position
+
         msg.position = [servo]
         self.arm_pub.publish(msg)
 
     def arm_home(self):
         msg = ServosPosition()
         msg.duration = 1.0
-        for servo_id, position in [(1, 500), (2, 500), (3, 500), (4, 500), (5, 500), (10, 500)]:
+
+        for servo_id, position in [
+            (1, 500),
+            (2, 500),
+            (3, 500),
+            (4, 500),
+            (5, 500),
+            (10, 500),
+        ]:
             servo = ServoPosition()
             servo.id = servo_id
             servo.position = position
             msg.position.append(servo)
+
         self.arm_pub.publish(msg)
 
     def get_image_width(self):
@@ -534,81 +578,66 @@ class RobotBridge(Node):
             return self._image_width
 
     def get_people_and_age(self):
-        """추종 컨트롤러용 — (탐지 리스트, 마지막 탐지로부터 경과 초)."""
         with self._people_lock:
             people = list(self.latest_people)
             last_t = self._last_detection_time
+
         if last_t == 0.0:
             return people, float("inf")
+
         return people, time.monotonic() - last_t
 
     def shutdown(self):
         self._stop_event.set()
         self._yolo_event.set()
         self.follow.stop()
+
         if self._yolo_thread is not None:
             self._yolo_thread.join(timeout=2.0)
 
 
-# ----------------------------------------------------------------------
-# 자동 추종 컨트롤러
-# ----------------------------------------------------------------------
 class FollowController:
-    """20Hz로 동작하는 P 제어 기반 사람 추종 컨트롤러.
-
-    상태 머신:
-      - "idle"      : 추종 OFF, 명령 미발행
-      - "searching" : 추종 ON, 대상을 못 찾음 → 정지 명령
-      - "tracking"  : 추종 ON, 대상 lock-on → P 제어 명령
-    """
-
     def __init__(self, bridge):
         self.bridge = bridge
 
-        # 파라미터 (환경변수로 튜닝 가능)
         self.rate_hz = float(os.getenv("FOLLOW_RATE_HZ", "20"))
         self.target_distance = float(os.getenv("FOLLOW_TARGET_DIST_M", "1.2"))
 
-        # P gains
-        self.kp_yaw = float(os.getenv("FOLLOW_KP_YAW", "1.2"))      # rad/s per unit error
-        self.kp_dist = float(os.getenv("FOLLOW_KP_DIST", "0.5"))    # m/s per meter error
+        self.kp_yaw = float(os.getenv("FOLLOW_KP_YAW", "1.2"))
+        self.kp_dist = float(os.getenv("FOLLOW_KP_DIST", "0.5"))
 
-        # 클램프 (기존 코드의 안전 상한과 동일 수준)
         self.max_linear = float(os.getenv("FOLLOW_MAX_LIN", "0.2"))
         self.max_angular = float(os.getenv("FOLLOW_MAX_ANG", "0.5"))
 
-        # 사각지대
-        self.deadzone_x = float(os.getenv("FOLLOW_DEADZONE_X", "0.08"))  # 정규화 단위
-        self.deadzone_dist = float(os.getenv("FOLLOW_DEADZONE_DIST", "0.1"))  # meters
+        self.deadzone_x = float(os.getenv("FOLLOW_DEADZONE_X", "0.08"))
+        self.deadzone_dist = float(os.getenv("FOLLOW_DEADZONE_DIST", "0.1"))
 
-        # Watchdog — 탐지가 이만큼 stale이면 정지
         self.detection_timeout = float(os.getenv("FOLLOW_TIMEOUT_S", "1.0"))
-
-        # 너무 가까우면 후진하지 않고 그냥 정지 (안전)
         self.min_safe_distance = float(os.getenv("FOLLOW_MIN_DIST_M", "0.5"))
 
-        # 상태
         self._enabled = False
         self._lock = threading.Lock()
         self._state = "idle"
-        self._locked_target = None  # latest_people 중 추종 중인 항목
+        self._locked_target = None
         self._last_linear = 0.0
         self._last_angular = 0.0
         self._last_error_x = 0.0
         self._last_error_distance = None
 
-        # 스레드
         self._thread = None
         self._stop_event = threading.Event()
 
     def start(self):
         self._thread = threading.Thread(
-            target=self._loop, name="follow_controller", daemon=True
+            target=self._loop,
+            name="follow_controller",
+            daemon=True,
         )
         self._thread.start()
 
     def stop(self):
         self._stop_event.set()
+
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
@@ -616,10 +645,11 @@ class FollowController:
         with self._lock:
             was_enabled = self._enabled
             self._enabled = bool(enabled)
+
             if not self._enabled:
                 self._state = "idle"
                 self._locked_target = None
-        # OFF로 전환되는 순간 즉시 정지 명령 한 번 발행
+
         if was_enabled and not enabled:
             self.bridge.publish_cmd(0.0, 0.0)
 
@@ -648,22 +678,21 @@ class FollowController:
                 "last_angular": self._last_angular,
             }
 
-    # ------------------------------------------------------------------
-    # 메인 루프
-    # ------------------------------------------------------------------
     def _loop(self):
         period = 1.0 / self.rate_hz
+
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
+
             try:
                 self._step()
             except Exception as e:
                 self.bridge.get_logger().error(f"FollowController step error: {e}")
-                # 에러 시 안전 정지
                 self.bridge.publish_cmd(0.0, 0.0)
 
             elapsed = time.monotonic() - loop_start
             sleep_for = period - elapsed
+
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
@@ -677,26 +706,22 @@ class FollowController:
                 self._locked_target = None
                 self._last_linear = 0.0
                 self._last_angular = 0.0
-            return  # 명령 발행 안 함 — 수동 제어를 방해하지 않기 위해
+            return
 
-        # 탐지 데이터 수집
         people, age = self.bridge.get_people_and_age()
         image_width = self.bridge.get_image_width()
 
-        # Watchdog: 탐지가 너무 오래됨 → 정지
         if age > self.detection_timeout or image_width is None:
             self._set_state("searching", None, 0.0, None)
             self.bridge.publish_cmd(0.0, 0.0)
             return
 
-        # 대상 선택
         target = self._select_target(people)
         if target is None:
             self._set_state("searching", None, 0.0, None)
             self.bridge.publish_cmd(0.0, 0.0)
             return
 
-        # 제어 계산
         linear, angular, err_x, err_dist = self._compute_command(target, image_width)
 
         with self._lock:
@@ -719,39 +744,34 @@ class FollowController:
             self._last_error_distance = err_dist
 
     def _select_target(self, people):
-        """가장 가까운 사람. 거리 정보 없으면 박스 면적이 가장 큰 사람."""
         if not people:
             return None
 
         with_distance = [p for p in people if p["distance"] is not None]
+
         if with_distance:
             return min(with_distance, key=lambda p: p["distance"])
 
-        # fallback: 박스 면적
         return max(people, key=lambda p: p["w"] * p["h"])
 
     def _compute_command(self, target, image_width):
-        # 1) yaw 제어 — 화면 중앙으로 정렬
         cx_target = target["x"] + target["w"] / 2.0
         half_width = image_width / 2.0
-        err_x = (cx_target - half_width) / half_width  # -1 ~ +1
+        err_x = (cx_target - half_width) / half_width
 
         if abs(err_x) < self.deadzone_x:
             angular = 0.0
         else:
-            # 화면 오른쪽(err_x > 0) → 시계방향 회전 → angular.z < 0
             angular = -self.kp_yaw * err_x
 
-        # 2) 거리 제어
         distance = target["distance"]
+
         if distance is None:
-            # 거리 정보 없음 — 회전만 하고 전진은 하지 않음
             linear = 0.0
             err_dist = None
         else:
             err_dist = distance - self.target_distance
 
-            # 너무 가깝고 후진 영역이면 안전 정지
             if distance < self.min_safe_distance:
                 linear = 0.0
             elif abs(err_dist) < self.deadzone_dist:
@@ -759,16 +779,12 @@ class FollowController:
             else:
                 linear = self.kp_dist * err_dist
 
-        # 3) 클램프
         linear = max(-self.max_linear, min(self.max_linear, linear))
         angular = max(-self.max_angular, min(self.max_angular, angular))
 
         return linear, angular, err_x, err_dist
 
 
-# ----------------------------------------------------------------------
-# Flask 엔드포인트
-# ----------------------------------------------------------------------
 @app.get("/")
 def dashboard():
     return Response(DASHBOARD_HTML, mimetype="text/html")
@@ -785,18 +801,27 @@ def control():
     x = max(-1.0, min(1.0, x))
     y = max(-1.0, min(1.0, y))
 
-    # 수동 제어가 들어오면 자동 추종을 자동으로 끈다 (안전/직관성).
     if node.follow.snapshot()["enabled"]:
         node.follow.set_enabled(False)
 
     if action == "stop":
         node.stop()
-        return jsonify({"ok": True, "action": "stop", "x": 0, "y": 0,
-                        "follow_auto_disabled": True})
+        return jsonify({
+            "ok": True,
+            "action": "stop",
+            "x": 0,
+            "y": 0,
+            "follow_auto_disabled": True,
+        })
 
     node.move(x, y)
-    return jsonify({"ok": True, "action": "move", "x": x, "y": y,
-                    "follow_auto_disabled": True})
+    return jsonify({
+        "ok": True,
+        "action": "move",
+        "x": x,
+        "y": y,
+        "follow_auto_disabled": True,
+    })
 
 
 @app.get("/arm")
@@ -809,9 +834,11 @@ def arm():
     if action == "home":
         node.arm_home()
         return jsonify({"ok": True, "action": "home"})
+
     if action == "grip":
         node.servo(10, 300, 0.5)
         return jsonify({"ok": True, "action": "grip", "id": 10, "position": 300})
+
     if action == "release":
         node.servo(10, 700, 0.5)
         return jsonify({"ok": True, "action": "release", "id": 10, "position": 700})
@@ -826,8 +853,11 @@ def arm():
 
     node.servo(servo_id, position, duration)
     return jsonify({
-        "ok": True, "action": "servo",
-        "id": servo_id, "position": position, "duration": duration,
+        "ok": True,
+        "action": "servo",
+        "id": servo_id,
+        "position": position,
+        "duration": duration,
     })
 
 
@@ -840,7 +870,7 @@ def detect():
     if enabled is not None:
         new_val = enabled.lower() in ("1", "true", "yes", "on")
         node.detection_enabled = new_val
-        # 탐지가 꺼지면 자동 추종도 꺼야 함 (위험)
+
         if not new_val and node.follow.snapshot()["enabled"]:
             node.follow.set_enabled(False)
 
@@ -867,11 +897,10 @@ def follow():
 
     if enabled is not None:
         want = enabled.lower() in ("1", "true", "yes", "on")
-        # 탐지가 꺼져있으면 follow 켤 수 없음
         if want and not node.detection_enabled:
             return jsonify({
                 "ok": False,
-                "error": "detection is off — enable /detect first",
+                "error": "detection is off - enable /detect first",
             }), 400
         node.follow.set_enabled(want)
 
@@ -898,9 +927,16 @@ def people():
         "count": len(snapshot),
         "people": [
             {
-                "x": p["x"], "y": p["y"], "w": p["w"], "h": p["h"],
+                "x": p["x"],
+                "y": p["y"],
+                "w": p["w"],
+                "h": p["h"],
                 "distance_m": p["distance"],
-                "position_3d_m": list(p["position_3d"]) if p["position_3d"] is not None else None,
+                "position_3d_m": (
+                    list(p["position_3d"])
+                    if p["position_3d"] is not None
+                    else None
+                ),
             }
             for p in snapshot
         ],
@@ -911,15 +947,37 @@ def frames():
     while True:
         with latest_jpeg_lock:
             data = latest_jpeg
+
         if data is None:
             time.sleep(0.1)
             continue
+
         yield (
             b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n" +
-            data +
-            b"\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + data
+            + b"\r\n"
         )
+
+        time.sleep(0.03)
+
+
+def depth_frames():
+    while True:
+        with latest_depth_jpeg_lock:
+            data = latest_depth_jpeg
+
+        if data is None:
+            time.sleep(0.1)
+            continue
+
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n"
+            + data
+            + b"\r\n"
+        )
+
         time.sleep(0.03)
 
 
@@ -928,25 +986,42 @@ def stream():
     return Response(frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.get("/depth_stream")
+def depth_stream():
+    return Response(depth_frames(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
 @app.get("/status")
 def status():
     if node is None:
         return jsonify({
             "ok": False,
-            "camera_frame_ready": False, "depth_frame_ready": False,
-            "camera_info_received": False, "detection_enabled": False,
-            "person_count": 0, "yolo_loaded": False,
-            "yolo_fps": 0.0, "frames_dropped": 0,
+            "camera_frame_ready": False,
+            "depth_view_ready": False,
+            "depth_frame_ready": False,
+            "camera_info_received": False,
+            "detection_enabled": False,
+            "person_count": 0,
+            "yolo_loaded": False,
+            "yolo_fps": 0.0,
+            "frames_dropped": 0,
             "follow": {
-                "enabled": False, "state": "idle",
-                "target_distance": 0.0, "target_locked": False,
-                "locked_distance": None, "error_x": 0.0,
-                "error_distance": None, "last_linear": 0.0, "last_angular": 0.0,
+                "enabled": False,
+                "state": "idle",
+                "target_distance": 0.0,
+                "target_locked": False,
+                "locked_distance": None,
+                "error_x": 0.0,
+                "error_distance": None,
+                "last_linear": 0.0,
+                "last_angular": 0.0,
             },
         })
 
     with latest_jpeg_lock:
         camera_ready = latest_jpeg is not None
+    with latest_depth_jpeg_lock:
+        depth_view_ready = latest_depth_jpeg is not None
     with node._depth_lock:
         depth_ready = node._depth_frame_ready
     with node._camera_info_lock:
@@ -957,6 +1032,7 @@ def status():
     return jsonify({
         "ok": True,
         "camera_frame_ready": camera_ready,
+        "depth_view_ready": depth_view_ready,
         "depth_frame_ready": depth_ready,
         "camera_info_received": info_received,
         "detection_enabled": node.detection_enabled,

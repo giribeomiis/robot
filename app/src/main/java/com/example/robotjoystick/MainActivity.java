@@ -13,6 +13,14 @@ import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import org.json.JSONObject;
+
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.WebSocket;
+import okhttp3.WebSocketListener;
+
 public class MainActivity extends Activity {
     private static final int COLOR_BACKGROUND = Color.rgb(246, 248, 251);
     private static final int COLOR_SURFACE = Color.WHITE;
@@ -26,6 +34,15 @@ public class MainActivity extends Activity {
     private Button wheelTabButton;
     private Button armTabButton;
     private TextView statusText;
+
+    private TextView distanceText;
+    private TextView gasText;
+    private TextView tempText;
+    private TextView humText;
+    private TextView sensorRawText;
+
+    private OkHttpClient sensorClient;
+    private WebSocket sensorWebSocket;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,6 +75,37 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 0.72f));
+
+        LinearLayout sensorBox = new LinearLayout(this);
+        sensorBox.setOrientation(LinearLayout.VERTICAL);
+        sensorBox.setPadding(16, 12, 16, 12);
+        sensorBox.setBackground(makeRoundedBackground(COLOR_SURFACE, Color.rgb(226, 232, 240), 14f));
+
+        TextView sensorTitle = new TextView(this);
+        sensorTitle.setText("Arduino Sensor Data");
+        sensorTitle.setTextColor(COLOR_TEXT);
+        sensorTitle.setTextSize(16f);
+        sensorTitle.setGravity(Gravity.CENTER);
+        sensorTitle.setPadding(0, 0, 0, 8);
+        sensorBox.addView(sensorTitle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        distanceText = makeSensorText("Distance: - cm");
+        gasText = makeSensorText("Gas: -");
+        tempText = makeSensorText("Temp: - °C");
+        humText = makeSensorText("Humidity: - %");
+        sensorRawText = makeSensorText("Raw: waiting...");
+
+        sensorBox.addView(distanceText);
+        sensorBox.addView(gasText);
+        sensorBox.addView(tempText);
+        sensorBox.addView(humText);
+        sensorBox.addView(sensorRawText);
+
+        root.addView(sensorBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout tabRow = new LinearLayout(this);
         tabRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -105,6 +153,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.WRAP_CONTENT));
 
         showWheelControls();
+        startSensorWebSocket();
         setContentView(root);
     }
 
@@ -260,8 +309,86 @@ public class MainActivity extends Activity {
         armTabButton.setEnabled(true);
     }
 
+    private TextView makeSensorText(String text) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextColor(COLOR_TEXT);
+        view.setTextSize(14f);
+        view.setPadding(0, 3, 0, 3);
+        return view;
+    }
+
+    private void startSensorWebSocket() {
+        sensorClient = new OkHttpClient();
+
+        Request request = new Request.Builder()
+                .url(RobotConfig.SENSOR_WS_URL)
+                .build();
+
+        sensorWebSocket = sensorClient.newWebSocket(request, new WebSocketListener() {
+            @Override
+            public void onOpen(WebSocket webSocket, Response response) {
+                runOnUiThread(() -> setStatus("Sensor WebSocket connected."));
+            }
+
+            @Override
+            public void onMessage(WebSocket webSocket, String text) {
+                runOnUiThread(() -> updateSensorData(text));
+            }
+
+            @Override
+            public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+                runOnUiThread(() -> setStatus("Sensor WebSocket error: " + t.getMessage()));
+            }
+
+            @Override
+            public void onClosed(WebSocket webSocket, int code, String reason) {
+                runOnUiThread(() -> setStatus("Sensor WebSocket closed."));
+            }
+        });
+    }
+
+    private void updateSensorData(String rawData) {
+        sensorRawText.setText("Raw: " + rawData);
+
+        try {
+            String jsonText = rawData.trim();
+
+            if (jsonText.startsWith("data:")) {
+                jsonText = jsonText.substring(5).trim();
+            }
+
+            if (jsonText.startsWith("'") && jsonText.endsWith("'")) {
+                jsonText = jsonText.substring(1, jsonText.length() - 1);
+            }
+
+            JSONObject json = new JSONObject(jsonText);
+
+            double distance = json.optDouble("distance", -1);
+            int gas = json.optInt("gas", -1);
+            double temperature = json.optDouble("temperature", -1);
+            double humidity = json.optDouble("humidity", -1);
+
+            distanceText.setText(String.format("Distance: %.2f cm", distance));
+            gasText.setText("Gas: " + gas);
+            tempText.setText(String.format("Temp: %.1f °C", temperature));
+            humText.setText(String.format("Humidity: %.1f %%", humidity));
+
+        } catch (Exception e) {
+            setStatus("Sensor parse error: " + e.getMessage());
+        }
+    }
+
     @Override
     protected void onDestroy() {
+        if (sensorWebSocket != null) {
+            sensorWebSocket.close(1000, "Activity destroyed");
+        }
+
+        if (sensorClient != null) {
+            sensorClient.dispatcher().executorService().shutdown();
+        }
+
         commandClient.sendStop(null);
         commandClient.shutdown();
         super.onDestroy();
